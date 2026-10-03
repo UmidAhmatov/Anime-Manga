@@ -1,0 +1,14 @@
+{
+  "name": "anime-manga-reader",
+  "version": "1.0.0",
+  "description": "Manga reader with a year-by-year timeline, RU/EN interface and automatic catalog updates",
+  "type": "module",
+  "engines": { "node": ">=20" },
+  "scripts": {
+    "start": "node server.js",
+    "demo": "MOCK=1 DATA_DIR=./data-demo node server.js",
+    "sync": "node scripts/sync.js",
+    "test": "node --test test/api.test.js"
+  },
+  "license": "MIT"
+}
