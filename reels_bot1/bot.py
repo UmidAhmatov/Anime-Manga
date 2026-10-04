@@ -271,6 +271,18 @@ async def main() -> None:
     except TelegramUnauthorizedError:
         sys.exit("Xato: BOT_TOKEN noto'g'ri. BotFather'dan tokenni qayta oling.")
 
+    # Claude kalitini va modelni darhol tekshiramiz (bepul so'rov): xato bo'lsa, foydalanuvchi emas, terminal ko'rsatadi
+    if not ANTHROPIC_API_KEY.startswith("sk-ant-"):
+        log.warning("ANTHROPIC_API_KEY 'sk-ant-' bilan boshlanmayapti: bu API kaliti emas, ehtimol noto'g'ri nusxalangan.")
+    try:
+        await client.models.retrieve(MODEL)
+    except anthropic.AuthenticationError:
+        sys.exit("Xato: ANTHROPIC_API_KEY noto'g'ri. console.anthropic.com -> API Keys'dan yangi kalit oling va .env ga qo'ying.")
+    except anthropic.NotFoundError:
+        sys.exit(f"Xato: model topilmadi: {MODEL}. .env dagi CLAUDE_MODEL ni tekshiring.")
+    except anthropic.APIError as err:
+        log.warning("Claude tekshiruvi o'tkazib yuborildi (%s): %s", type(err).__name__, err)
+
     if not ALLOWED_USER_IDS:
         log.warning("ALLOWED_USER_IDS bo'sh: bot hech kimga javob bermaydi, faqat ID'ni ko'rsatadi.")
     log.info("bot_started username=@%s model=%s allowed=%s", me.username, MODEL, sorted(ALLOWED_USER_IDS))
