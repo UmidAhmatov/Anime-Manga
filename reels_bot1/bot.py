@@ -28,7 +28,7 @@ from dotenv import load_dotenv
 import secretary
 from prompts import QAHRAMON, SYSTEM_PROMPT, USLUB
 
-load_dotenv()
+load_dotenv(override=True)  # .env ustun: kompyuterda eski ANTHROPIC_API_KEY o'rnatilgan bo'lsa ham
 
 logging.basicConfig(
     level=logging.INFO,
@@ -269,6 +269,7 @@ async def main() -> None:
     try:
         me = await bot.get_me()
     except TelegramUnauthorizedError:
+        await bot.session.close()
         sys.exit("Xato: BOT_TOKEN noto'g'ri. BotFather'dan tokenni qayta oling.")
 
     # Claude kalitini va modelni darhol tekshiramiz (bepul so'rov): xato bo'lsa, foydalanuvchi emas, terminal ko'rsatadi
@@ -277,8 +278,14 @@ async def main() -> None:
     try:
         await client.models.retrieve(MODEL)
     except anthropic.AuthenticationError:
-        sys.exit("Xato: ANTHROPIC_API_KEY noto'g'ri. console.anthropic.com -> API Keys'dan yangi kalit oling va .env ga qo'ying.")
+        await bot.session.close()
+        sys.exit(
+            "Xato: Claude bu kalitni qabul qilmadi (401). Ishlatilayotgan kalit: "
+            f"{ANTHROPIC_API_KEY[:10]}...{ANTHROPIC_API_KEY[-4:]} (uzunligi {len(ANTHROPIC_API_KEY)}).\n"
+            "console.anthropic.com -> API Keys'dan yangi kalit oling va .env dagi ANTHROPIC_API_KEY ga qo'ying."
+        )
     except anthropic.NotFoundError:
+        await bot.session.close()
         sys.exit(f"Xato: model topilmadi: {MODEL}. .env dagi CLAUDE_MODEL ni tekshiring.")
     except anthropic.APIError as err:
         log.warning("Claude tekshiruvi o'tkazib yuborildi (%s): %s", type(err).__name__, err)
