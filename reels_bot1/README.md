@@ -71,6 +71,20 @@ Amazon Linux bo'lsa: foydalanuvchi `ec2-user`, `apt` o'rniga `dnf`, va `reels-bo
 - `/veo` — [QAHRAMON] va [USLUB] matnlari, bosib nusxa olinadi
 - `/new` — kontekstni tozalash (yangi mavzu)
 
+## 4.1. Kotib funksiyalari
+
+Oddiy gapiring, Claude o'zi mos asbobni chaqiradi:
+
+- `ertaga soat 9:00 da dars haqida eslat` — eslatma (vaqti kelganda bot o'zi yozadi)
+- `vazifa qo'sh: reels montaj qilish, juma kuniga` — vazifa
+- `montaj vazifasini bajarildi qil` — vazifani yopish
+- `qayd: yangi reels g'oyasi — ...` — qayd; `qaydlardan "g'oya" ni top` — qidirish
+- `/tasks`, `/reminders`, `/notes` — ro'yxatlar, `/brief` — bugungi xulosa
+
+Har kuni soat 08:00 da (Toshkent) bot bugungi eslatmalar va ochiq vazifalar xulosasini o'zi yuboradi.
+Soatni `.env` dagi `BRIEF_HOUR=8` bilan o'zgartiring, `-1` bo'lsa o'chadi.
+Ma'lumotlar `secretary.db` faylida saqlanadi (serverga ko'chirganda shu faylni ham olib boring). Bot o'chiq paytda kelgan eslatmalar ishga tushganda "kechikib" belgisi bilan yuboriladi.
+
 ## 5. Muammolar
 
 | Belgi | Sabab va yechim |

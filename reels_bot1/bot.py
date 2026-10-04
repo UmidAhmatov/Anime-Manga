@@ -18,13 +18,14 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 import anthropic
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher, F, Router
 from aiogram.exceptions import TelegramUnauthorizedError
 from aiogram.filters import Command, CommandStart
 from aiogram.types import Message
 from aiogram.utils.chat_action import ChatActionSender
 from dotenv import load_dotenv
 
+import secretary
 from prompts import QAHRAMON, SYSTEM_PROMPT, USLUB
 
 load_dotenv()
@@ -62,6 +63,7 @@ ALLOWED_USER_IDS = _parse_ids(os.getenv("ALLOWED_USER_IDS", ""))
 TZ = ZoneInfo("Asia/Tashkent")
 WEEKDAYS_UZ = ["Dushanba", "Seshanba", "Chorshanba", "Payshanba", "Juma", "Shanba", "Yakshanba"]
 TG_LIMIT = 4000          # Telegram chegarasi 4096 belgi, ozgina zaxira qoldiramiz
+MAX_TOOL_ROUNDS = 6      # bitta xabarga javobda Claude ko'pi bilan nechta asbob chaqiruvi
 HISTORY_TURNS = 3        # oxirgi 3 ta savol-javob eslab qolinadi ("2-sini yoz" ishlashi uchun)
 
 
@@ -73,6 +75,7 @@ busy: set[int] = set()   # javob kutilayotgan foydalanuvchilar (parallel so'rovl
 
 client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY, max_retries=3, timeout=180.0)
 dp = Dispatcher()
+chat = Router()  # umumiy matn handlerlari: buyruqlardan keyin tekshirilishi uchun oxirida ulanadi
 
 
 # ---------- Yordamchi funksiyalar ----------
@@ -113,27 +116,40 @@ def friendly_error(err: Exception) -> str:
 
 async def ask_claude(user_id: int, text: str) -> str:
     now = datetime.now(TZ)
-    today = f"Bugun: {WEEKDAYS_UZ[now.weekday()]}, {now:%d.%m.%Y} (Toshkent vaqti)."
+    today = f"Hozir: {WEEKDAYS_UZ[now.weekday()]}, {now:%d.%m.%Y %H:%M} (Toshkent vaqti)."
     messages = [*history[user_id], {"role": "user", "content": text}]
 
     started = time.monotonic()
-    response = await client.messages.create(
-        model=MODEL,
-        max_tokens=MAX_TOKENS,
-        system=[
-            # Katta, o'zgarmas qism keshlanadi: ketma-ket savollarda arzonroq tushadi
-            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
-            {"type": "text", "text": today},
-        ],
-        messages=messages,
-    )
-    usage = response.usage
-    log.info(
-        "claude_ok user_id=%s model=%s in_tok=%s out_tok=%s cache_read=%s stop=%s duration_ms=%d",
-        user_id, MODEL, usage.input_tokens, usage.output_tokens,
-        getattr(usage, "cache_read_input_tokens", None), response.stop_reason,
-        (time.monotonic() - started) * 1000,
-    )
+    for _ in range(MAX_TOOL_ROUNDS + 1):
+        response = await client.messages.create(
+            model=MODEL,
+            max_tokens=MAX_TOKENS,
+            system=[
+                # Katta, o'zgarmas qism keshlanadi: ketma-ket savollarda arzonroq tushadi
+                {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+                {"type": "text", "text": today},
+            ],
+            tools=secretary.TOOLS,
+            messages=messages,
+        )
+        usage = response.usage
+        log.info(
+            "claude_ok user_id=%s model=%s in_tok=%s out_tok=%s cache_read=%s stop=%s duration_ms=%d",
+            user_id, MODEL, usage.input_tokens, usage.output_tokens,
+            getattr(usage, "cache_read_input_tokens", None), response.stop_reason,
+            (time.monotonic() - started) * 1000,
+        )
+        if response.stop_reason != "tool_use":
+            break
+        # Kotib asboblari (eslatma, vazifa, qayd): natijani Claude'ga qaytaramiz
+        messages.append({"role": "assistant", "content": response.content})
+        results = []
+        for block in response.content:
+            if block.type == "tool_use":
+                out = secretary.run_tool(user_id, block.name, block.input)
+                log.info("tool user_id=%s name=%s", user_id, block.name)
+                results.append({"type": "tool_result", "tool_use_id": block.id, "content": out})
+        messages.append({"role": "user", "content": results})
 
     reply = "".join(block.text for block in response.content if block.type == "text").strip()
     if not reply:
@@ -172,7 +188,10 @@ async def cmd_start(message: Message) -> None:
         "• faqat hook kerak: React o'rganish haqida\n\n"
         "Buyruqlar:\n"
         "/new — yangi suhbat (oldingi kontekstni unutish)\n"
-        "/veo — [QAHRAMON] va [USLUB] matnlari (bosib nusxa olish uchun)"
+        "/veo — [QAHRAMON] va [USLUB] matnlari (bosib nusxa olish uchun)\n\n"
+        "Kotib: oddiy gapiring, masalan \"ertaga 9:00 da dars haqida eslat\", "
+        "\"vazifa qo'sh: reels montaj qilish\", \"qayd: yangi g'oya ...\".\n"
+        "/tasks — vazifalar, /reminders — eslatmalar, /notes — qaydlar, /brief — bugungi xulosa"
     )
 
 
@@ -188,7 +207,27 @@ async def cmd_veo(message: Message) -> None:
     await message.answer(f"[USLUB] =\n<code>{html.escape(USLUB)}</code>", parse_mode="HTML")
 
 
-@dp.message(F.text)
+@dp.message(Command("tasks"))
+async def cmd_tasks(message: Message) -> None:
+    await message.answer("📋 Vazifalar:\n" + secretary.list_tasks(message.from_user.id))
+
+
+@dp.message(Command("reminders"))
+async def cmd_reminders(message: Message) -> None:
+    await message.answer(secretary.list_reminders(message.from_user.id))
+
+
+@dp.message(Command("notes"))
+async def cmd_notes(message: Message) -> None:
+    await message.answer("🗒 Qaydlar:\n" + secretary.list_notes(message.from_user.id))
+
+
+@dp.message(Command("brief"))
+async def cmd_brief(message: Message) -> None:
+    await message.answer(secretary.brief(message.from_user.id))
+
+
+@chat.message(F.text)
 async def handle_text(message: Message) -> None:
     user_id = message.from_user.id
     if user_id in busy:
@@ -215,7 +254,7 @@ async def handle_text(message: Message) -> None:
         await message.answer(part)
 
 
-@dp.message()
+@chat.message()
 async def handle_other(message: Message) -> None:
     await message.answer(
         "Hozircha faqat matnli xabarlarni tushunaman. "
@@ -238,7 +277,12 @@ async def main() -> None:
 
     # Bot o'chiq paytda yozilgan eski xabarlarga javob bermaymiz (pul ham tejaladi)
     await bot.delete_webhook(drop_pending_updates=True)
-    await dp.start_polling(bot)
+    scheduler_task = asyncio.create_task(secretary.scheduler(bot, ALLOWED_USER_IDS))
+    dp.include_router(chat)
+    try:
+        await dp.start_polling(bot)
+    finally:
+        scheduler_task.cancel()
 
 
 if __name__ == "__main__":
