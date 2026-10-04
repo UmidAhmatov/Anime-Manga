@@ -55,7 +55,14 @@ def _parse_ids(raw: str) -> set[int]:
 
 
 BOT_TOKEN = _require("BOT_TOKEN")
-ANTHROPIC_API_KEY = _require("ANTHROPIC_API_KEY")
+# Claude'ga kirish: oddiy API kaliti (sk-ant-api03-...) YOKI bearer token (ANTHROPIC_AUTH_TOKEN, masalan sk-ant-usr-...)
+ANTHROPIC_API_KEY = os.getenv("ANTHROPIC_API_KEY", "").strip()
+ANTHROPIC_AUTH_TOKEN = os.getenv("ANTHROPIC_AUTH_TOKEN", "").strip()
+if not ANTHROPIC_API_KEY and not ANTHROPIC_AUTH_TOKEN:
+    sys.exit("Xato: .env faylida ANTHROPIC_API_KEY (yoki ANTHROPIC_AUTH_TOKEN) yo'q. .env.example'ga qarang.")
+USE_TOKEN = not ANTHROPIC_API_KEY  # API kalit bo'sh bo'lsa, bearer token ishlatiladi
+CREDENTIAL = ANTHROPIC_AUTH_TOKEN if USE_TOKEN else ANTHROPIC_API_KEY
+CREDENTIAL_NAME = "ANTHROPIC_AUTH_TOKEN" if USE_TOKEN else "ANTHROPIC_API_KEY"
 MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5").strip()
 MAX_TOKENS = int(os.getenv("MAX_TOKENS", "4000"))
 ALLOWED_USER_IDS = _parse_ids(os.getenv("ALLOWED_USER_IDS", ""))
@@ -73,7 +80,13 @@ HISTORY_TURNS = 3        # oxirgi 3 ta savol-javob eslab qolinadi ("2-sini yoz" 
 history: dict[int, deque] = defaultdict(lambda: deque(maxlen=HISTORY_TURNS * 2))
 busy: set[int] = set()   # javob kutilayotgan foydalanuvchilar (parallel so'rovlar pul yemasin)
 
-client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY, max_retries=3, timeout=180.0)
+if USE_TOKEN:
+    client = anthropic.AsyncAnthropic(
+        api_key=None, auth_token=ANTHROPIC_AUTH_TOKEN, max_retries=3, timeout=180.0,
+        default_headers={"anthropic-beta": "oauth-2025-04-20"},  # OAuth/bearer tokenlar uchun kerak
+    )
+else:
+    client = anthropic.AsyncAnthropic(api_key=ANTHROPIC_API_KEY, max_retries=3, timeout=180.0)
 dp = Dispatcher()
 chat = Router()  # umumiy matn handlerlari: buyruqlardan keyin tekshirilishi uchun oxirida ulanadi
 
@@ -100,7 +113,7 @@ def split_message(text: str, limit: int = TG_LIMIT) -> list[str]:
 
 def friendly_error(err: Exception) -> str:
     if isinstance(err, anthropic.AuthenticationError):
-        return "❌ Claude API kaliti noto'g'ri yoki o'chirilgan. .env faylidagi ANTHROPIC_API_KEY ni tekshiring."
+        return "❌ Claude API kaliti noto'g'ri yoki o'chirilgan. .env faylidagi Claude kalitini tekshiring."
     if isinstance(err, anthropic.RateLimitError):
         return "⏳ Claude hozir limitga yetdi. 1-2 daqiqadan keyin qayta yozing."
     if isinstance(err, anthropic.BadRequestError) and "credit" in str(err).lower():
@@ -273,16 +286,17 @@ async def main() -> None:
         sys.exit("Xato: BOT_TOKEN noto'g'ri. BotFather'dan tokenni qayta oling.")
 
     # Claude kalitini va modelni darhol tekshiramiz (bepul so'rov): xato bo'lsa, foydalanuvchi emas, terminal ko'rsatadi
-    if not ANTHROPIC_API_KEY.startswith("sk-ant-"):
-        log.warning("ANTHROPIC_API_KEY 'sk-ant-' bilan boshlanmayapti: bu API kaliti emas, ehtimol noto'g'ri nusxalangan.")
+    if not CREDENTIAL.startswith("sk-ant-"):
+        log.warning("%s 'sk-ant-' bilan boshlanmayapti: ehtimol noto'g'ri nusxalangan.", CREDENTIAL_NAME)
+    log.info("claude_auth=%s", CREDENTIAL_NAME)
     try:
         await client.models.retrieve(MODEL)
     except anthropic.AuthenticationError:
         await bot.session.close()
         sys.exit(
-            "Xato: Claude bu kalitni qabul qilmadi (401). Ishlatilayotgan kalit: "
-            f"{ANTHROPIC_API_KEY[:10]}...{ANTHROPIC_API_KEY[-4:]} (uzunligi {len(ANTHROPIC_API_KEY)}).\n"
-            "console.anthropic.com -> API Keys'dan yangi kalit oling va .env dagi ANTHROPIC_API_KEY ga qo'ying."
+            f"Xato: Claude bu kalitni qabul qilmadi (401). Ishlatilayotgan: {CREDENTIAL_NAME}="
+            f"{CREDENTIAL[:10]}...{CREDENTIAL[-4:]} (uzunligi {len(CREDENTIAL)}).\n"
+            "console.anthropic.com -> API Keys'dan yangi kalit (sk-ant-api03-...) oling va .env dagi ANTHROPIC_API_KEY ga qo'ying."
         )
     except anthropic.NotFoundError:
         await bot.session.close()
