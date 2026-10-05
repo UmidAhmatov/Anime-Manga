@@ -11,6 +11,7 @@ import asyncio
 import html
 import logging
 import os
+import re
 import sys
 import time
 from collections import defaultdict, deque
@@ -19,12 +20,13 @@ from zoneinfo import ZoneInfo
 
 import anthropic
 from aiogram import Bot, Dispatcher, F, Router
-from aiogram.exceptions import TelegramUnauthorizedError
-from aiogram.filters import Command, CommandStart
-from aiogram.types import Message
+from aiogram.exceptions import TelegramBadRequest, TelegramUnauthorizedError
+from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.types import BotCommand, Message
 from aiogram.utils.chat_action import ChatActionSender
 from dotenv import load_dotenv
 
+import commands
 import secretary
 from prompts import QAHRAMON, SYSTEM_PROMPT, USLUB
 
@@ -64,7 +66,7 @@ USE_TOKEN = not ANTHROPIC_API_KEY  # API kalit bo'sh bo'lsa, bearer token ishlat
 CREDENTIAL = ANTHROPIC_AUTH_TOKEN if USE_TOKEN else ANTHROPIC_API_KEY
 CREDENTIAL_NAME = "ANTHROPIC_AUTH_TOKEN" if USE_TOKEN else "ANTHROPIC_API_KEY"
 MODEL = os.getenv("CLAUDE_MODEL", "claude-sonnet-5-5").strip()
-MAX_TOKENS = int(os.getenv("MAX_TOKENS", "4000"))
+MAX_TOKENS = int(os.getenv("MAX_TOKENS", "6000"))
 ALLOWED_USER_IDS = _parse_ids(os.getenv("ALLOWED_USER_IDS", ""))
 
 TZ = ZoneInfo("Asia/Tashkent")
@@ -98,17 +100,55 @@ def is_allowed(message: Message) -> bool:
 
 
 def split_message(text: str, limit: int = TG_LIMIT) -> list[str]:
-    """Uzun javobni Telegram chegarasiga sig'adigan bo'laklarga, iloji boricha qator chegarasidan bo'ladi."""
+    """Uzun javobni Telegram chegarasiga sig'adigan bo'laklarga, iloji boricha qator chegarasidan bo'ladi.
+
+    Kod bloki (```) bo'lak o'rtasida kesilsa, birinchi bo'lakda yopiladi va keyingisida qayta ochiladi.
+    """
     parts = []
+    reopen = False
     while len(text) > limit:
         cut = text.rfind("\n", 0, limit)
         if cut < limit // 2:
             cut = limit
-        parts.append(text[:cut].rstrip())
-        text = text[cut:].lstrip("\n")
+        part, text = text[:cut].rstrip(), text[cut:].lstrip("\n")
+        if reopen:
+            part = "```\n" + part
+        reopen = part.count("```") % 2 == 1
+        if reopen:
+            part += "\n```"
+        parts.append(part)
     if text.strip():
-        parts.append(text)
+        parts.append(("```\n" + text) if reopen else text)
     return parts
+
+
+_FENCE = re.compile(r"```[^\n`]*\n?(.*?)```", re.S)
+_INLINE = re.compile(r"`([^`\n]+)`")
+
+
+def to_html(text: str) -> str:
+    """```kod``` bloklarini Telegram'ning <pre>, `kod` ni <code> ko'rinishiga o'tkazadi, qolgani oddiy matn."""
+    def plain(chunk: str) -> str:
+        return _INLINE.sub(r"<code>\1</code>", html.escape(chunk, quote=False))
+
+    out, pos = [], 0
+    for m in _FENCE.finditer(text):
+        out.append(plain(text[pos:m.start()]))
+        out.append("<pre>" + html.escape(m.group(1).rstrip("\n"), quote=False) + "</pre>")
+        pos = m.end()
+    out.append(plain(text[pos:]))
+    return "".join(out)
+
+
+async def send_reply(message: Message, reply: str) -> None:
+    for part in split_message(reply):
+        if "`" in part:
+            try:
+                await message.answer(to_html(part), parse_mode="HTML")
+                continue
+            except TelegramBadRequest as err:  # kutilmagan belgilar: oddiy matn sifatida yuboramiz
+                log.warning("html_yuborilmadi: %s", err)
+        await message.answer(part, parse_mode=None)
 
 
 def friendly_error(err: Exception) -> str:
@@ -118,6 +158,9 @@ def friendly_error(err: Exception) -> str:
         return "⏳ Claude hozir limitga yetdi. 1-2 daqiqadan keyin qayta yozing."
     if isinstance(err, anthropic.BadRequestError) and "credit" in str(err).lower():
         return "💳 Claude API balansi tugagan. console.anthropic.com -> Billing bo'limida to'ldiring."
+    if isinstance(err, anthropic.BadRequestError):
+        detail = (getattr(err, "message", None) or str(err))[:300]
+        return f"⚠️ Claude so'rovni rad etdi (400): {detail}"
     if isinstance(err, anthropic.NotFoundError):
         return f"❌ Model topilmadi: {MODEL}. .env faylidagi CLAUDE_MODEL ni tekshiring."
     if isinstance(err, anthropic.APIConnectionError):  # timeout ham shu yerga kiradi
@@ -127,29 +170,44 @@ def friendly_error(err: Exception) -> str:
     return "⚠️ Kutilmagan xato yuz berdi. Server loglarini tekshiring."
 
 
+async def _create(messages: list, today: str, with_tools: bool):
+    kwargs = dict(
+        model=MODEL,
+        max_tokens=MAX_TOKENS,
+        system=[
+            # Katta, o'zgarmas qism keshlanadi: ketma-ket savollarda arzonroq tushadi
+            {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
+            {"type": "text", "text": today},
+        ],
+        messages=messages,
+    )
+    if with_tools:
+        kwargs["tools"] = secretary.TOOLS
+    return await client.messages.create(**kwargs)
+
+
 async def ask_claude(user_id: int, text: str) -> str:
     now = datetime.now(TZ)
     today = f"Hozir: {WEEKDAYS_UZ[now.weekday()]}, {now:%d.%m.%Y %H:%M} (Toshkent vaqti)."
     messages = [*history[user_id], {"role": "user", "content": text}]
 
     started = time.monotonic()
+    with_tools = True
     for _ in range(MAX_TOOL_ROUNDS + 1):
-        response = await client.messages.create(
-            model=MODEL,
-            max_tokens=MAX_TOKENS,
-            system=[
-                # Katta, o'zgarmas qism keshlanadi: ketma-ket savollarda arzonroq tushadi
-                {"type": "text", "text": SYSTEM_PROMPT, "cache_control": {"type": "ephemeral"}},
-                {"type": "text", "text": today},
-            ],
-            tools=secretary.TOOLS,
-            messages=messages,
-        )
+        try:
+            response = await _create(messages, today, with_tools)
+        except anthropic.BadRequestError as err:
+            if not with_tools or "credit" in str(err).lower():
+                raise
+            # Asboblar (kotib) bilan 400 bo'lsa, javobsiz qolmaslik uchun asbobsiz qayta urinamiz
+            log.warning("tools_bilan_400 user_id=%s detail=%s: asbobsiz qayta uriniladi", user_id, err)
+            with_tools = False
+            response = await _create(messages, today, with_tools)
         usage = response.usage
         log.info(
-            "claude_ok user_id=%s model=%s in_tok=%s out_tok=%s cache_read=%s stop=%s duration_ms=%d",
+            "claude_ok user_id=%s model=%s in_tok=%s out_tok=%s cache_read=%s stop=%s tools=%s duration_ms=%d",
             user_id, MODEL, usage.input_tokens, usage.output_tokens,
-            getattr(usage, "cache_read_input_tokens", None), response.stop_reason,
+            getattr(usage, "cache_read_input_tokens", None), response.stop_reason, with_tools,
             (time.monotonic() - started) * 1000,
         )
         if response.stop_reason != "tool_use":
@@ -195,17 +253,21 @@ async def cmd_start(message: Message) -> None:
     name = message.from_user.first_name if message.from_user else ""
     await message.answer(
         f"Salom, {name}! 👋\n\n"
-        "Menga oddiy qilib yozing, masalan:\n"
-        "• reels g'oyasi kerak\n"
-        "• AI video laboratoriya uchun ssenariy yoz\n"
-        "• faqat hook kerak: React o'rganish haqida\n\n"
-        "Buyruqlar:\n"
-        "/new — yangi suhbat (oldingi kontekstni unutish)\n"
-        "/veo — [QAHRAMON] va [USLUB] matnlari (bosib nusxa olish uchun)\n\n"
-        "Kotib: oddiy gapiring, masalan \"ertaga 9:00 da dars haqida eslat\", "
-        "\"vazifa qo'sh: reels montaj qilish\", \"qayd: yangi g'oya ...\".\n"
-        "/tasks — vazifalar, /reminders — eslatmalar, /notes — qaydlar, /brief — bugungi xulosa"
+        "Men sizning shaxsiy yordamchingizman: AI video, dasturlash va kotib.\n\n"
+        "Oddiy gapiring yoki buyruq ishlating:\n"
+        "• /goya — reels g'oyalari\n"
+        "• /ssenariy mavzu — to'liq Veo ssenariysi\n"
+        "• /kod vazifa — kod yozish\n"
+        "• /xato xato matni — xatoni topish\n"
+        "• \"ertaga 9:00 da dars haqida eslat\" — eslatma\n\n"
+        "/help — barcha buyruqlar ro'yxati"
     )
+
+
+@dp.message(Command("help"))
+async def cmd_help(message: Message) -> None:
+    for page in commands.help_pages():
+        await message.answer(page)
 
 
 @dp.message(Command("new"))
@@ -240,8 +302,22 @@ async def cmd_brief(message: Message) -> None:
     await message.answer(secretary.brief(message.from_user.id))
 
 
-@chat.message(F.text)
-async def handle_text(message: Message) -> None:
+@dp.message(Command(*commands.NAMES))
+async def cmd_profession(message: Message, command: CommandObject) -> None:
+    cmd = commands.BY_NAME[command.command]
+    args = (command.args or "").strip()
+    reply_to = message.reply_to_message
+    if reply_to is not None and (reply_to.text or reply_to.caption):
+        # Boshqa xabarga javob qilib yuborilsa, o'sha xabar matni ham qo'shiladi (uzun kod uchun qulay)
+        quoted = reply_to.text or reply_to.caption
+        args = f"{args}\n\n{quoted}".strip()
+    if cmd.arg and not args:
+        await message.answer(f"✏️ Matn kerak. Masalan:\n{commands.usage(cmd)}\n\n{cmd.desc}")
+        return
+    await respond(message, commands.build_prompt(cmd, args))
+
+
+async def respond(message: Message, text: str) -> None:
     user_id = message.from_user.id
     if user_id in busy:
         await message.answer("⏳ Oldingi so'rov hali tayyorlanmoqda, biroz kuting.")
@@ -250,7 +326,7 @@ async def handle_text(message: Message) -> None:
     busy.add(user_id)
     try:
         async with ChatActionSender.typing(bot=message.bot, chat_id=message.chat.id):
-            reply = await ask_claude(user_id, message.text)
+            reply = await ask_claude(user_id, text)
     except anthropic.APIError as err:
         log.error("claude_error user_id=%s type=%s detail=%s", user_id, type(err).__name__, err)
         await message.answer(friendly_error(err))
@@ -262,9 +338,12 @@ async def handle_text(message: Message) -> None:
     finally:
         busy.discard(user_id)
 
-    # Oddiy matn sifatida yuboramiz (parse_mode yo'q), shunda belgi xatolari botni yiqitmaydi
-    for part in split_message(reply):
-        await message.answer(part)
+    await send_reply(message, reply)
+
+
+@chat.message(F.text)
+async def handle_text(message: Message) -> None:
+    await respond(message, message.text)
 
 
 @chat.message()
@@ -310,6 +389,20 @@ async def main() -> None:
 
     # Bot o'chiq paytda yozilgan eski xabarlarga javob bermaymiz (pul ham tejaladi)
     await bot.delete_webhook(drop_pending_updates=True)
+    menu = [
+        BotCommand(command="help", description="Barcha buyruqlar ro'yxati"),
+        BotCommand(command="new", description="Yangi suhbat (kontekstni tozalash)"),
+        BotCommand(command="veo", description="[QAHRAMON] va [USLUB] matnlari"),
+        BotCommand(command="tasks", description="Vazifalar"),
+        BotCommand(command="reminders", description="Eslatmalar"),
+        BotCommand(command="notes", description="Qaydlar"),
+        BotCommand(command="brief", description="Bugungi xulosa"),
+        *(BotCommand(command=c.name, description=c.desc[:200]) for c in commands.COMMANDS),
+    ]
+    try:
+        await bot.set_my_commands(menu)
+    except Exception:  # menyu o'rnatilmasa ham bot ishlayveradi
+        log.exception("menyu_ornatilmadi")
     scheduler_task = asyncio.create_task(secretary.scheduler(bot, ALLOWED_USER_IDS))
     dp.include_router(chat)
     try:

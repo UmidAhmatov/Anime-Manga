@@ -85,6 +85,16 @@ Har kuni soat 08:00 da (Toshkent) bot bugungi eslatmalar va ochiq vazifalar xulo
 Soatni `.env` dagi `BRIEF_HOUR=8` bilan o'zgartiring, `-1` bo'lsa o'chadi.
 Ma'lumotlar `secretary.db` faylida saqlanadi (serverga ko'chirganda shu faylni ham olib boring). Bot o'chiq paytda kelgan eslatmalar ishga tushganda "kechikib" belgisi bilan yuboriladi.
 
+## 4.2. Kasbga mo'ljallangan buyruqlar
+
+Telegram'da `/help` yozing: 47 ta buyruq ro'yxati chiqadi. Ular `commands.py` faylida, yangisini qo'shish uchun bitta qator yozish kifoya.
+
+- **AI video va kontent:** `/goya`, `/hook`, `/ssenariy`, `/hafta`, `/sovga`, `/veoprompt`, `/kling`, `/higgsfield`, `/yaxshila`, `/kadrlar`, `/storyboard`, `/ovoz`, `/caption`, `/hashtag`, `/cta`, `/muqova`, `/musiqa`, `/tahlil`, `/qayta`, `/tutorial`, `/sketch`
+- **Dasturlash:** `/kod`, `/xato`, `/tushuntir`, `/review`, `/refaktor`, `/optimal`, `/test`, `/hujjat`, `/xavfsizlik`, `/konvert`, `/regex`, `/sql`, `/git`, `/terminal`, `/fastapi`, `/react`, `/tgbot`, `/docker`, `/aws`, `/reja`, `/arxitektura`, `/readme`, `/commit`, `/intervyu`, `/yolxarita`, `/aiprompt`
+- **Kotib:** `/tasks`, `/reminders`, `/notes`, `/brief` va oddiy gap bilan eslatma, vazifa, qayd
+
+Buyruqdan keyin matn yozing (`/xato TypeError: ...`) yoki kod turgan xabarga **javob (reply)** qilib faqat `/xato` deb yuboring. Kod Telegram'da `<pre>` blok ko'rinishida chiqadi.
+
 ## 5. Muammolar
 
 | Belgi | Sabab va yechim |
